@@ -1,0 +1,169 @@
+---
+title: "NYPD Shooting Analysis"
+output: html_document
+--- 
+
+# Introduction
+
+This report analyzes NYPD shooting incident data to examine trends in the age groups of perpetrators and victims, the locations where shootings occur, and the presence of potential biases in the data. By exploring patterns across boroughs and location types, the report aims to better understand the social dynamics and reporting inconsistencies surrounding gun violence in New York City.
+
+# Scope
+
+This analysis is limited to documented shooting incidents and does not encompass other forms of violent crime. Socioeconomic factors are not included in the dataset, so no assumptions are made about causes based on class or income level.
+
+```{r setup}
+knitr::opts_chunk$set(
+  include=TRUE,
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE)
+```
+
+```{r libraries}
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(readr)
+library(leaflet)
+library(gt)
+library(tidyr)
+```
+
+```{r}
+data <- read.csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
+data <- data %>%
+  select(INCIDENT_KEY, OCCUR_DATE, BORO, LOC_OF_OCCUR_DESC, LOCATION_DESC,
+         PERP_AGE_GROUP, VIC_AGE_GROUP, PERP_SEX, PERP_RACE,
+         VIC_SEX, VIC_RACE, Latitude, Longitude)
+
+data_clean <- data %>%
+  filter(!is.na(PERP_AGE_GROUP) & !is.na(VIC_AGE_GROUP)) %>%
+  mutate(
+    PERP_AGE_GROUP = trimws(as.character(PERP_AGE_GROUP)),
+    VIC_AGE_GROUP = trimws(as.character(VIC_AGE_GROUP)),
+    LOCATION_DESC = trimws(as.character(LOCATION_DESC)),
+
+    PERP_AGE_GROUP = case_when(
+      PERP_AGE_GROUP %in% c("<18", "18-24", "25-44", "45-64", "65+", "UNKNOWN") ~ PERP_AGE_GROUP, TRUE ~ "OTHER"),
+
+    PERP_AGE_GROUP = factor(PERP_AGE_GROUP, levels = c("<18", "18-24", "25-44", "45-64", "65+", "UNKNOWN")),
+
+    GENERIC_LOC = toupper(LOC_OF_OCCUR_DESC) %in% c("INSIDE", "OUTSIDE", "FRONT OF", "REAR OF", "OPPOSITE OF", "UNKNOWN"),
+    HAS_DETAILED_LOCATION = !is.na(LOCATION_DESC) & LOCATION_DESC != ""
+  ) %>%
+  filter(PERP_AGE_GROUP != "OTHER")
+
+```
+
+# Age Group Analysis
+
+The majority of both perpetrators and victims fall within the 18–44 age range. While this does not conclusively establish causation, it may indicate a trend of peer-to-peer violence. In densely populated urban environments, dynamics such as social status and perceived respect may intensify interpersonal conflicts, particularly among young adults who share similar social spaces.
+
+```{r age ranges}
+ggplot(data_clean, aes(x = PERP_AGE_GROUP, fill = VIC_AGE_GROUP)) +
+  geom_bar(position = "dodge") +
+  labs(title = "Victim Age Group by Perpetrator Age Group",
+       x = "Perpetrator Age Group", y = "Count", fill = "Victim Age Group") +
+  theme_minimal()
+
+```
+
+# Location Analysis
+
+A substantial number of incidents occur in and around residential areas. Going deeper into residential areas, incidents are especially common around multi-dwelling units and public housing. These location patterns may point to areas of concentrated violence. However, any assumptions about the role of income, race, or intent require more comprehensive data to avoid reinforcing socioeconomic or racial bias.
+
+```{r}
+location_counts <- data_clean %>%
+  filter(HAS_DETAILED_LOCATION) %>%
+  filter(!grepl("^\\d+$", LOCATION_DESC)) %>%
+  count(LOCATION_DESC, sort = TRUE)
+
+head(location_counts, 10)
+```
+
+# Map of Incidents
+
+```{r}
+set.seed(123)
+data_mapped <- data_clean %>%
+  filter(!is.na(Latitude) & !is.na(Longitude)) %>%
+  sample_n(1000)
+
+leaflet(data_mapped) %>%
+  addTiles() %>%
+  addCircleMarkers(~Longitude, ~Latitude, radius = 3,
+                   color = "red", stroke = FALSE, fillOpacity = 0.5,
+                   popup = ~paste("Perp Age:", PERP_AGE_GROUP, "<br>",
+                                  "Vic Age:", VIC_AGE_GROUP, "<br>",
+                                  "Location:", LOCATION_DESC))
+```
+
+# Bias Check
+
+There are  gaps in the data such as possible under-reporting of cases in the Bronx. Despite the Bronx having a significantly higher number of shootings than Manhattan, both boroughs report nearly the same rate of missing perpetrator age data. Given the socioeconomic diversity within both boroughs, this raises questions about data collection protocols and whether sufficient resources are being allocated equitably to document such incidents.
+```{r}
+bronx_manhattan_bias <- data_clean %>%
+  filter(BORO %in% c("BRONX", "MANHATTAN")) %>%
+  mutate(perp_age_missing = PERP_AGE_GROUP %in% c("UNKNOWN", "(null)", NA)) %>%
+  group_by(BORO) %>%
+  summarize(
+    total_shootings = n(),
+    missing_perp_age = sum(perp_age_missing, na.rm = TRUE),
+    percent_missing = round(missing_perp_age / total_shootings * 100, 1)
+  )
+
+print(as.data.frame(bronx_manhattan_bias))
+
+
+bronx_manhattan_long <- bronx_manhattan_bias %>%
+  pivot_longer(cols = c("total_shootings", "missing_perp_age"),
+               names_to = "metric", values_to = "value") %>%
+  mutate(metric = recode(metric,
+                         "total_shootings" = "Total Shootings",
+                         "missing_perp_age" = "Missing Perpetrator Age"))
+
+
+ggplot(bronx_manhattan_long, aes(x = BORO, y = value, fill = metric)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c("steelblue", "tomato")) +
+  labs(title = "Reported Shootings vs Missing Perpetrator Age",
+       x = "Borough", y = "Number of Incidents", fill = "") +
+  theme_minimal()
+```
+
+# Modeling the Likelihood of a Shooting Taking Place
+```{r}
+borough_counts <- data_clean %>%
+  group_by(BORO) %>%
+  summarize(total_shootings = n()) %>%
+  arrange(desc(total_shootings))
+
+print(as.data.frame(borough_counts))
+
+
+borough_pop <- data.frame(
+  BORO = c("BRONX", "BROOKLYN", "MANHATTAN", "QUEENS", "STATEN ISLAND"),
+  population = c(1471160, 2648771, 1664727, 2358582, 495747)
+)
+
+shooting_rates <- left_join(borough_counts, borough_pop, by = "BORO") %>%
+  mutate(shootings_per_100k = total_shootings / population * 100000)
+
+ggplot(shooting_rates, aes(x = reorder(BORO, -shootings_per_100k), y = shootings_per_100k, fill = BORO)) +
+  geom_col(show.legend = FALSE) +
+  labs(title = "Shootings per 100,000 Residents by Borough",
+       x = "Borough", y = "Shooting Rate per 100k") +
+  theme_minimal()
+
+```
+
+# Conclusion
+
+Ultimately, while the data sheds light on several structural and demographic patterns, deeper investigation and richer datasets are necessary to form actionable conclusions about root causes and solutions.
+
+
+```{r}
+sessionInfo()
+
+```
+
