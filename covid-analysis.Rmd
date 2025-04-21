@@ -1,0 +1,206 @@
+---
+title: "COVID-19 Data Insights"
+output: html_document
+---
+
+```{r setup}
+knitr::opts_chunk$set(
+  include=TRUE,
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE)
+```
+
+```{r libraries and data read in}
+
+
+library(tidyverse)
+library(janitor)
+library(lubridate)
+
+
+url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+files <- c("time_series_covid19_confirmed_global.csv", 
+           "time_series_covid19_deaths_global.csv",
+           "time_series_covid19_confirmed_US.csv",  
+           "time_series_covid19_deaths_US.csv")
+urls <- paste0(url_in, files)
+
+
+global_cases <- read_csv(urls[1], show_col_types = FALSE) %>% clean_names()
+global_deaths <- read_csv(urls[2], show_col_types = FALSE) %>% clean_names()
+us_cases <- read_csv(urls[3], show_col_types = FALSE) %>% clean_names()
+us_deaths <- read_csv(urls[4], show_col_types = FALSE) %>% clean_names() 
+```
+
+```{r}
+#tidying up date formats to long format instead of wide
+confirmed_long <- global_cases %>%
+  #removing x to proper date format
+  pivot_longer(cols = matches("^x?\\d+"), names_to = "date", values_to = "confirmed") %>%
+  mutate(date = mdy(gsub("^x", "", date))) %>%
+  #grouping by region
+  group_by(country_region, date) %>%
+  summarise(confirmed = sum(confirmed, na.rm = TRUE), .groups = "drop")
+
+deaths_long <- global_deaths %>%
+  pivot_longer(cols = matches("^x?\\d+"), names_to = "date", values_to = "deaths") %>%
+  mutate(date = mdy(gsub("^x", "", date))) %>%
+  group_by(country_region, date) %>%
+  summarise(deaths = sum(deaths, na.rm = TRUE), .groups = "drop")
+
+
+```
+
+```{r, fig.width=12, fig.height=8}
+
+#calculating CFR (Case Fatality Rate) by countries with 1000+ cases
+cfr_data <- left_join(confirmed_long, deaths_long, by = c("country_region", "date")) %>%
+  mutate(cfr = ifelse(confirmed > 1000, deaths / confirmed, NA)) %>%
+  filter(date == max(date, na.rm = TRUE))
+
+
+region_lookup <- tribble(
+  ~country_region,        ~region,
+  "United States",        "North America",
+  "Canada",               "North America",
+  "Mexico",               "North America",
+  "Brazil",               "South America",
+  "Argentina",            "South America",
+  "Colombia",             "South America",
+  "Chile",                "South America",
+  "Peru",                 "South America",
+  "Venezuela",            "South America",
+  "Ecuador",               "South America",
+  "Paraguay",              "South America",
+  "Uruguay",             "South America",
+  "Bolivia",             "South America",
+  "France",               "Europe",
+  "Germany",              "Europe",
+  "Italy",                "Europe",
+  "Spain",                "Europe",
+  "United Kingdom",       "Europe",
+  "Russia",               "Europe",
+  "Poland",               "Europe",
+  "Netherlands",          "Europe",
+  "Belgium",              "Europe",
+  "Ukraine",              "Europe",
+  "India",                "Asia",
+  "China",                "Asia",
+  "Japan",                "Asia",
+  "Indonesia",            "Asia",
+  "Iran",                 "Asia",
+  "Turkey",               "Asia",
+  "Saudi Arabia",         "Asia",
+  "Pakistan",             "Asia",
+  "Bangladesh",           "Asia",
+  "South Korea",          "Asia",
+  "South Africa",         "Africa",
+  "Egypt",                "Africa",
+  "Nigeria",              "Africa",
+  "Morocco",              "Africa",
+  "Algeria",              "Africa",
+  "Ethiopia",             "Africa",
+  "Kenya",                "Africa",
+  "Tunisia",              "Africa",
+  "Ghana",                "Africa",
+  "Cameroon",             "Africa"
+)
+
+#country-to-continent mapping via manual lookup
+cfr_region <- cfr_data %>%
+  left_join(region_lookup, by = "country_region") %>%
+  filter(!is.na(region))
+
+#filtering out 10 countries with the highest count per region
+top_cfr_per_region <- cfr_region %>%
+  group_by(region) %>%
+  mutate(rank = rank(-cfr)) %>%
+  filter((region == "North America") | rank <= 10) %>%
+  ungroup()
+
+ggplot(top_cfr_per_region, aes(x = reorder(country_region, cfr), y = cfr, fill = region)) +
+  geom_col() +
+  coord_flip() +
+  facet_wrap(~ region, scales = "free_y") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +  
+  labs(title = "COVID-19 Case Fatality Ratio by Region",
+       subtitle = "Top 10 countries in each region (All of North America shown)",
+       x = "Country", y = "CFR (Deaths / Confirmed Cases)") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none", 
+    strip.text = element_text(face = "bold"),
+    axis.text.y = element_text(size = 10))
+```
+
+# Top 10 CFR countries by region (excluding the US)
+
+This visualization highlights the countries with the highest Case Fatality Ratios (CFRs) within each region. Countries like Italy and the UK stand out in Europe with relatively high CFRs, while several South American countries, such as Peru and Ecuador, also show elevated fatality rates. North America shows more moderate CFRs, with the U.S. and Canada well below some of their global counterparts. The variation in CFRs may reflect differences in healthcare systems, reporting accuracy, demographics, or testing coverage.
+
+```{r}
+top5 <- confirmed_long %>%
+  group_by(country_region) %>%
+  summarise(max_cases = max(confirmed, na.rm = TRUE), .groups = "drop") %>%
+  slice_max(max_cases, n = 5) %>%
+  pull(country_region)
+
+ggplot(filter(confirmed_long, country_region %in% top5),
+       aes(x = date, y = confirmed, color = country_region)) +
+  geom_line(linewidth = 1) +
+  labs(title = "Top 5 Countries: COVID-19 Confirmed Case Trends",
+       x = "Date", y = "Confirmed Cases") +
+  theme_minimal()
+
+```
+
+# Trajectory of growth
+
+The line chart illustrates the trajectory of confirmed COVID-19 cases in the five hardest-hit countries globally. These include the United States, India, Brazil, Russia, and the United Kingdom. Steep upward slopes in the early months reflect rapid transmission, while plateaus or slower growth later on may indicate improved containment or data stabilization. This chart emphasizes the sheer scale of outbreaks in the most impacted nations and helps contextualize global spread dynamics.
+
+```{r, warning=FALSE, message=FALSE}
+#calculating days since initial case count
+italy_data <- confirmed_long %>%
+  filter(country_region == "Italy") %>%
+  arrange(date) %>%
+  mutate(days_since = as.numeric(date - min(date, na.rm = TRUE)))
+
+
+#Logistic Model Structure = K / (1 + exp(-r*(t - t0)))
+logistic_model <- nls(confirmed ~ SSlogis(days_since, Asym, xmid, scal),
+                      data = italy_data)
+
+#predicting future values per rolling 14 days
+future_days <- 0:(max(italy_data$days_since) + 14)
+logistic_preds <- data.frame(days_since = future_days)
+logistic_preds$predicted_cases <- predict(logistic_model, newdata = logistic_preds)
+logistic_preds$date <- min(italy_data$date) + future_days
+
+#plotting prediction vs actual
+ggplot() +
+  geom_line(data = italy_data, aes(x = date, y = confirmed), color = "steelblue", linewidth = 1) +
+  geom_line(data = logistic_preds, aes(x = date, y = predicted_cases), color = "darkgreen", linetype = "dashed", linewidth = 1) +
+  labs(title = "Italy: Logistic Model Forecast vs. Actual Cases",
+       x = "Date", y = "Confirmed Cases",
+       subtitle = "Dashed line represents forecasted values") +
+  theme_minimal()
+```
+
+# Italy's forecasted growth vs. actuality
+
+The logistic growth model provided nuanced prediction of Italy’s COVID-19 case trajectory by accounting for the natural slowing of infections as the outbreak matured. The fitted curve closely followed the early exponential growth phase and effectively modeled the tapering off of new cases, suggesting that the spread had begun to stabilize during the observed period. However, when compared to actual case counts, the forecast slightly underestimated the number of new cases, indicating that factors such as evolving variants, behavioral changes, or shifting public health measures may have altered the trajectory beyond what the model anticipated. This highlights both the usefulness and the limitations of logistic modeling in capturing the dynamic and sometimes unpredictable nature of pandemics.
+
+# Bias as a result of limitation of the datasets
+
+-   Different countries have standards for attributing deaths to COVID-19. Some count only lab-confirmed deaths while others include suspected cases.
+
+-   Not all countries reported data with the same frequency or accuracy. Some under reported cases or deaths due to limited testing capacity, political reasons, or differences in medical infrastructure
+
+-   Events and region-based analysis can skew when non-standard entities are included. Situations like cruise ships, concerts, and other large scale gathers skew geographic accuracy when it comes to reporting.
+
+# Conclusion
+This analysis was a snapshot of the scale, spread, and severity of COVID-19 across regions and over time. From the variability in Case Fatality Ratios (CFRs) to the differing outbreak trajectories of the most affected countries, no single factor can define this global pandemic. Predictive models like the logistic curve help visualize possible trends - such as my deep dive with Italy - they also highlight the challenges of forecasting in a crisis that is evolving ever so rapidly. Insights are only as strong as the data behind them and with the differences to be made in standardizing data reporting, it can help continue to shape our understanding of COVID-19’s global impact.
+
+```{r}
+sessionInfo()
+
+```
